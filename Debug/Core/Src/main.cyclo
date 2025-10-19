@@ -1,0 +1,5 @@
+../Core/Src/main.c:63:5:__io_putchar	1
+../Core/Src/main.c:88:20:motor_dir_forward	1
+../Core/Src/main.c:115:5:main	1
+../Core/Src/main.c:204:6:SystemClock_Config	3
+../Core/Src/main.c:255:6:Error_Handler	1
