@@ -66,17 +66,8 @@ int __io_putchar(int ch) {
   return ch;
 }
 
-/* Signed delta with wrap handling for 16-bit TIM3 */
-/*
-static inline int16_t tim3_get_delta_and_update(uint16_t *last) {
-  uint16_t now = __HAL_TIM_GET_COUNTER(&htim3);
-  int16_t d = (int16_t)(now - *last);  // auto wrap-safe
-  *last = now;
-  return d;
-}
-*/
-
-static inline void set_duty_percent_TIM2_CH1(uint8_t pct) {
+// Motor helpers
+static inline void set_duty_pct(uint8_t pct) {
 	if (pct > 100) pct = 100;
 	uint32_t period = __HAL_TIM_GET_AUTORELOAD(&htim2) + 1; // ARR+1
 	uint32_t ccr = (period * pct + 50) / 100;               // rounded
@@ -96,11 +87,12 @@ static inline void motor_dir_reverse(void) {
 
 // Soft-start: brief kick then settle
 static inline void soft_start_to(uint8_t target_pct, uint8_t kick_pct, uint16_t kick_ms) {
-  set_duty_percent_TIM2_CH1(kick_pct);
+  set_duty_pct(kick_pct);
   HAL_Delay(kick_ms);
-  set_duty_percent_TIM2_CH1(target_pct);
+  set_duty_pct(target_pct);
 }
 
+// State variables (declare ONLY here)
 static uint16_t enc_last;
 static uint32_t t_sample;
 static uint32_t t_print;
@@ -138,23 +130,18 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_TIM2_Init();
-  //MX_USART2_UART_Init();
-  //MX_TIM3_Init();
+  MX_USART2_UART_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);           // if you're using PWM
-  //HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);     // start encoder
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET); // IN2 = 0
+  HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);     // start encoder
 
-  motor_dir_forward();
+  set_duty_pct(20);
 
-  //enc_last    = __HAL_TIM_GET_COUNTER(&htim3);        // <-- runtime init OK here
-  //t_sample    = HAL_GetTick();
-  //t_print     = HAL_GetTick();
- // delta_accum = 0;
-
-  uint32_t period = __HAL_TIM_GET_AUTORELOAD(&htim2) + 1;
-  uint32_t compare = period / 2;
-  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, compare);
+  enc_last    = __HAL_TIM_GET_COUNTER(&htim3);        // <-- runtime init OK here
+  t_sample    = HAL_GetTick();
+  t_print     = HAL_GetTick();
+  delta_accum = 0;
 
 
   /* USER CODE END 2 */
@@ -163,33 +150,31 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  /*
 	  uint32_t now = HAL_GetTick();
 
-	  if ((now - t_sample) >= 10) {              // sample every 10 ms
-	    t_sample += 10;
+	    if ((now - t_sample) >= 10) {              // sample every 10 ms
+	      t_sample += 10;
 
-	    uint16_t enc_now = __HAL_TIM_GET_COUNTER(&htim3);
-	    int16_t  d       = (int16_t)(enc_now - enc_last); // wrap-safe
-	    enc_last = enc_now;
+	      uint16_t enc_now = __HAL_TIM_GET_COUNTER(&htim3);
+	      int16_t  d       = (int16_t)(enc_now - enc_last); // wrap-safe
+	      enc_last = enc_now;
 
-	    delta_accum += d;
-	  }
+	      delta_accum += d;
+	    }
 
-	  if ((now - t_print) >= 100) {              // print every 100 ms
-	    uint32_t dt = now - t_print;
-	    t_print = now;
+	    if ((now - t_print) >= 100) {              // print every 100 ms
+	      uint32_t dt = now - t_print;
+	      t_print = now;
 
-	    float cps = (1000.0f / (float)dt) * (float)delta_accum;
-	    float rps = cps / (float)CPR;
-	    float rpm = rps * 60.0f;
+	      float cps = (1000.0f / (float)dt) * (float)delta_accum;
+	      float rps = cps / (float)CPR;
+	      float rpm = rps * 60.0f;
 
-	    printf("accum=%ld  cps=%.1f  RPM=%.1f\r\n",
-	           (long)delta_accum, cps, rpm);
+	      printf("accum=%ld  cps=%.1f  RPM=%.1f\r\n",
+	    		  (long)delta_accum, cps, rpm);
 
-	    delta_accum = 0;
-	  }
-	  */
+	      delta_accum = 0;
+	    }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
