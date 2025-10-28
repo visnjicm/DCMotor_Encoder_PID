@@ -26,6 +26,7 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <math.h>
+#include <stdlib.h>
 
 /* USER CODE END Includes */
 
@@ -60,6 +61,13 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN 0 */
 #define CPR 2000 // TODO: adjust after measurement
 #define RPM_SMOOTH 5
+#define CMD_BUF_LEN 16
+
+//global variables
+volatile float target_rpm = 0.0f;
+uint8_t rx_byte;
+char cmd_buf[CMD_BUF_LEN];
+uint8_t cmd_idx = 0;
 
 // Simple printf retarget to USART2
 int __io_putchar(int ch) {
@@ -93,6 +101,34 @@ static inline void soft_start_to(uint8_t target_pct, uint8_t kick_pct, uint16_t 
   HAL_Delay(kick_ms);
   set_duty_pct(target_pct);
 }
+
+//UART receive callback
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+
+	if (huart->Instance == USART2) {
+
+        // immediately restart the receive for the next byte
+        HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
+
+        // now process the received byte
+        if (rx_byte == '\r' || rx_byte == '\n') {
+            if (cmd_idx > 0) { // only process if there is something in buffer
+                cmd_buf[cmd_idx] = 0; // null-terminate
+                if (cmd_buf[0] == 'S') { // set speed command
+                    float new_rpm = atof(&cmd_buf[1]);
+                    if (new_rpm >= 0.0f && new_rpm <= 200.0f) {
+                        target_rpm = new_rpm;
+                        printf("New target RPM: %.1f\r\n", target_rpm);
+                    }
+                }
+                cmd_idx = 0; // reset buffer
+            }
+        } else if (cmd_idx < (CMD_BUF_LEN - 1)) {
+            cmd_buf[cmd_idx++] = rx_byte; // store received byte
+        }
+    }
+}
+
 
 // State variables (declare ONLY here)
 static uint16_t enc_last;
@@ -139,14 +175,15 @@ int main(void)
   /* USER CODE BEGIN 2 */
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);           // if you're using PWM
   HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);     // start encoder
-
-  set_duty_pct(20);
+  HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
 
   enc_last    = __HAL_TIM_GET_COUNTER(&htim3);        // <-- runtime init OK here
   t_sample    = HAL_GetTick();
   t_print     = HAL_GetTick();
   delta_accum = 0;
 
+  uint8_t test_char = 'A';
+  HAL_UART_Transmit(&huart2, &test_char, 1, HAL_MAX_DELAY);
 
   /* USER CODE END 2 */
 
@@ -188,35 +225,82 @@ int main(void)
 	      for (uint8_t i = 0; i < RPM_SMOOTH; i++) rpm_sum += rpm_history[i];
 	      float rpm_filtered = rpm_sum / RPM_SMOOTH;
 
-	      // --- Simple P controller addition ---
-	      static float duty = 0.0f;             // persistent duty value (0–100%)
-	      const float target_rpm = 20.0f;      // desired speed
-	      const float Kp = 0.05f;               // proportional gain (start small!)
+
+	      // --- Replace existing PI/PID block with this tuned PID ---
+	      static float duty = 0.0f;
 	      static float integral = 0.0f;
-	      const float Ki = 0.005f;  // small, start tiny
+	      static float last_error = 0.0f;
+	      static float deriv_filt = 0.0f;
 
-	      // anti-windup clamp
-	      if (integral > 10.0f) integral = 10.0f;
-	      if (integral < -10.0f) integral = -10.0f;
+	      // Tunable gains (start conservative)
+	      const float Kp = 0.03f;        // reduce proportional (was ~0.055)
+	      const float Ki = 0.00025f;      // small integral, scaled by dt below
+	      const float Kd = 0.004f;        // slightly stronger damping
+	      const float d_alpha = 0.85f;    // derivative smoothing (0..1, higher => smoother)
 
+	      // Behaviour limits
+	      const float deadband = 1.5f;    // ±1.5 RPM considered "good enough" (was 1.0)
+	      const float integ_enable_margin = 2.0f; // only integrate when |error| > deadband * margin
+	      const float Imax = 50.0f;       // much smaller integral clamp
+	      const float max_duty_step = 0.8f; // max duty percent change per update (prevents kicks)
 
-	      float error = target_rpm - rpm_filtered;       // speed error
-	      if (fabs(error) <= 1.0f) error = 0.0f;
-	      else integral += Ki * error;
+	      // compute dt in seconds (use the dt you already computed above)
+	      float dt_s = (float)dt / 1000.0f;         // dt is ms between prints
+	      if (dt_s <= 0.0f) dt_s = 0.1f;           // safety fallback
 
-	      if (error != 0.0f){
-	      duty += Kp * error + integral;                   // adjust duty
-	      if (duty > 100.0f) duty = 100.0f;
-	      if (duty < 0.0f) duty = 0.0f;
-	      set_duty_pct(duty);                   // update PWM output
+	      // error
+	      float error = target_rpm - rpm_filtered;
+
+	      // integral: only accumulate when error is meaningfully outside the deadband
+	      if (fabsf(error) > (deadband * integ_enable_margin)) {
+	          integral += error * Ki * dt_s; // scale Ki with dt
+	      } else {
+	          // optionally slightly unwind integral slowly toward zero to avoid bias
+	          integral *= 0.999f;
 	      }
+
+	      // clamp integral
+	      if (integral > Imax) integral = Imax;
+	      if (integral < -Imax) integral = -Imax;
+
+	      // derivative (as rate): difference divided by dt
+	      float deriv = (error - last_error) / dt_s;
+	      deriv_filt = (d_alpha * deriv_filt) + ((1.0f - d_alpha) * deriv);
+	      float d_out = Kd * deriv_filt;
+
+	      // Compose PID output (note: Ki already applied to integral above)
+	      float pid_out = (Kp * error) + integral + d_out;
+
+	      // If within deadband, don't change duty (hold last duty) — prevents twitching
+	      if (fabsf(error) <= deadband) {
+	          // hold duty — do nothing
+	      } else {
+	          // rate-limit the duty change
+	          float new_duty = duty + pid_out;
+	          float delta = new_duty - duty;
+	          if (delta > max_duty_step) delta = max_duty_step;
+	          if (delta < -max_duty_step) delta = -max_duty_step;
+	          duty += delta;
+
+	          // clamp final duty
+	          if (duty > 100.0f) duty = 100.0f;
+	          if (duty < 0.0f) duty = 0.0f;
+
+	          set_duty_pct((uint8_t)(duty + 0.5f)); // update PWM (rounded)
+	      }
+
+	      // save previous error
+	      last_error = error;
+
+
 
 	      printf("RPM=%.1f target=%.1f duty=%.1f%%\r\n", rpm_filtered, target_rpm, duty);
 
-
-
 	      printf("accum=%ld  cps=%.1f  RPM=%.1f\r\n",
 	    		  (long)delta_accum, cps, rpm_filtered);
+
+	      printf("err=%.2f P=%.2f I=%.2f D=%.2f duty=%.1f\r\n",
+	             error, Kp*error, Ki*integral, Kd*deriv_filt, duty);
 
 	      delta_accum = 0;
 	    }
