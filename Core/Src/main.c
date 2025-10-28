@@ -25,6 +25,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include <math.h>
 
 /* USER CODE END Includes */
 
@@ -57,7 +58,8 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-#define CPR 44 // TODO: adjust after measurement
+#define CPR 2000 // TODO: adjust after measurement
+#define RPM_SMOOTH 5
 
 // Simple printf retarget to USART2
 int __io_putchar(int ch) {
@@ -97,6 +99,8 @@ static uint16_t enc_last;
 static uint32_t t_sample;
 static uint32_t t_print;
 static int32_t  delta_accum;
+static float rpm_history[RPM_SMOOTH];
+static uint8_t rpm_idx = 0;
 
 /* USER CODE END 0 */
 
@@ -150,6 +154,13 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  	//FIND CPR of Motor Code Snippet
+	  /*
+	    uint16_t now2 = __HAL_TIM_GET_COUNTER(&htim3);
+	    printf("enc=%u\r\n", now2);
+	    HAL_Delay(200);
+	    */
+
 	  uint32_t now = HAL_GetTick();
 
 	    if ((now - t_sample) >= 10) {              // sample every 10 ms
@@ -168,10 +179,44 @@ int main(void)
 
 	      float cps = (1000.0f / (float)dt) * (float)delta_accum;
 	      float rps = cps / (float)CPR;
-	      float rpm = rps * 60.0f;
+	      float measured_rpm = rps * 60.0f;
+
+	      rpm_history[rpm_idx++] = measured_rpm;
+	      if (rpm_idx >= RPM_SMOOTH) rpm_idx = 0;
+
+	      float rpm_sum = 0.0f;
+	      for (uint8_t i = 0; i < RPM_SMOOTH; i++) rpm_sum += rpm_history[i];
+	      float rpm_filtered = rpm_sum / RPM_SMOOTH;
+
+	      // --- Simple P controller addition ---
+	      static float duty = 0.0f;             // persistent duty value (0–100%)
+	      const float target_rpm = 20.0f;      // desired speed
+	      const float Kp = 0.05f;               // proportional gain (start small!)
+	      static float integral = 0.0f;
+	      const float Ki = 0.005f;  // small, start tiny
+
+	      // anti-windup clamp
+	      if (integral > 10.0f) integral = 10.0f;
+	      if (integral < -10.0f) integral = -10.0f;
+
+
+	      float error = target_rpm - rpm_filtered;       // speed error
+	      if (fabs(error) <= 1.0f) error = 0.0f;
+	      else integral += Ki * error;
+
+	      if (error != 0.0f){
+	      duty += Kp * error + integral;                   // adjust duty
+	      if (duty > 100.0f) duty = 100.0f;
+	      if (duty < 0.0f) duty = 0.0f;
+	      set_duty_pct(duty);                   // update PWM output
+	      }
+
+	      printf("RPM=%.1f target=%.1f duty=%.1f%%\r\n", rpm_filtered, target_rpm, duty);
+
+
 
 	      printf("accum=%ld  cps=%.1f  RPM=%.1f\r\n",
-	    		  (long)delta_accum, cps, rpm);
+	    		  (long)delta_accum, cps, rpm_filtered);
 
 	      delta_accum = 0;
 	    }
