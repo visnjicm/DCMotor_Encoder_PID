@@ -182,9 +182,6 @@ int main(void)
   t_print     = HAL_GetTick();
   delta_accum = 0;
 
-  uint8_t test_char = 'A';
-  HAL_UART_Transmit(&huart2, &test_char, 1, HAL_MAX_DELAY);
-
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -233,14 +230,14 @@ int main(void)
 	      static float deriv_filt = 0.0f;
 
 	      // Tunable gains (start conservative)
-	      const float Kp = 0.03f;        // reduce proportional (was ~0.055)
-	      const float Ki = 0.00025f;      // small integral, scaled by dt below
-	      const float Kd = 0.004f;        // slightly stronger damping
+	      const float Kp = 0.0f;        // ultimate gain ~ 0.35f when Kd = Ki = 0
+	      const float Ki = 0.0f;      // small integral, scaled by dt below
+	      const float Kd = 0.0f;        // slightly stronger damping
 	      const float d_alpha = 0.85f;    // derivative smoothing (0..1, higher => smoother)
 
 	      // Behaviour limits
-	      const float deadband = 1.5f;    // ±1.5 RPM considered "good enough" (was 1.0)
-	      const float integ_enable_margin = 2.0f; // only integrate when |error| > deadband * margin
+	      const float deadband = 1.0f;    // ±1.5 RPM considered "good enough" (was 1.0)
+	      //const float integ_enable_margin = 2.0f; // only integrate when |error| > deadband * margin
 	      const float Imax = 50.0f;       // much smaller integral clamp
 	      const float max_duty_step = 0.8f; // max duty percent change per update (prevents kicks)
 
@@ -251,6 +248,7 @@ int main(void)
 	      // error
 	      float error = target_rpm - rpm_filtered;
 
+	      /*
 	      // integral: only accumulate when error is meaningfully outside the deadband
 	      if (fabsf(error) > (deadband * integ_enable_margin)) {
 	          integral += error * Ki * dt_s; // scale Ki with dt
@@ -258,6 +256,16 @@ int main(void)
 	          // optionally slightly unwind integral slowly toward zero to avoid bias
 	          integral *= 0.999f;
 	      }
+	      */
+	      static float p_term;
+
+	      float ff = (0.487f * target_rpm) + 11.47f; //feedforward term based on linear regression of data
+
+
+	      p_term = Kp * error;
+
+
+	      integral += error * dt_s; // scale Ki with dt
 
 	      // clamp integral
 	      if (integral > Imax) integral = Imax;
@@ -265,42 +273,50 @@ int main(void)
 
 	      // derivative (as rate): difference divided by dt
 	      float deriv = (error - last_error) / dt_s;
-	      deriv_filt = (d_alpha * deriv_filt) + ((1.0f - d_alpha) * deriv);
-	      float d_out = Kd * deriv_filt;
+	      //deriv_filt = (d_alpha * deriv_filt) + ((1.0f - d_alpha) * deriv);
+	      float d_out = Kd * deriv;
+	      float i_out = Ki * integral;
+
+	      //d_out = 0.0f;
+	      //integral = 0.0f;
 
 	      // Compose PID output (note: Ki already applied to integral above)
-	      float pid_out = (Kp * error) + integral + d_out;
+	      float pid_out = p_term + i_out + d_out;
 
 	      // If within deadband, don't change duty (hold last duty) — prevents twitching
 	      if (fabsf(error) <= deadband) {
 	          // hold duty — do nothing
 	      } else {
 	          // rate-limit the duty change
+	    	  /*
 	          float new_duty = duty + pid_out;
 	          float delta = new_duty - duty;
 	          if (delta > max_duty_step) delta = max_duty_step;
 	          if (delta < -max_duty_step) delta = -max_duty_step;
 	          duty += delta;
+	          */
+
+	    	  duty = pid_out + ff;
 
 	          // clamp final duty
 	          if (duty > 100.0f) duty = 100.0f;
 	          if (duty < 0.0f) duty = 0.0f;
 
-	          set_duty_pct((uint8_t)(duty + 0.5f)); // update PWM (rounded)
+	          if (!target_rpm) duty = 0;
+
+	          set_duty_pct((uint8_t)(duty)); // update PWM (rounded)
 	      }
 
 	      // save previous error
 	      last_error = error;
 
-
-
 	      printf("RPM=%.1f target=%.1f duty=%.1f%%\r\n", rpm_filtered, target_rpm, duty);
 
-	      printf("accum=%ld  cps=%.1f  RPM=%.1f\r\n",
-	    		  (long)delta_accum, cps, rpm_filtered);
+	      //printf("accum=%ld  cps=%.1f  RPM=%.1f\r\n",
+	      //	(long)delta_accum, cps, rpm_filtered);
 
-	      printf("err=%.2f P=%.2f I=%.2f D=%.2f duty=%.1f\r\n",
-	             error, Kp*error, Ki*integral, Kd*deriv_filt, duty);
+	      printf("PID=%.2f error=%.2f P=%.2f I=%.2f D=%.2f duty=%.1f\r\n",
+	             pid_out, fabsf(error), p_term, i_out, d_out, duty);
 
 	      delta_accum = 0;
 	    }
