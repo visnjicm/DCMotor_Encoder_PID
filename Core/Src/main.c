@@ -37,7 +37,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define CPR 2000 // TODO: adjust after measurement
+#define RPM_SMOOTH 5
+#define CMD_BUF_LEN 16
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -48,7 +50,15 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+volatile float target_rpm = 0.0f;
+uint8_t rx_byte;
+char cmd_buf[CMD_BUF_LEN];
+uint8_t cmd_idx = 0;
 
+static float ff_a = 0.487f;   // default (prior no-load)
+static float ff_b = 11.47f;   // default (prior no-load)
+
+static uint8_t pid_enabled = 1; // *** NEW ***
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -59,15 +69,7 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-#define CPR 2000 // TODO: adjust after measurement
-#define RPM_SMOOTH 5
-#define CMD_BUF_LEN 16
 
-//global variables
-volatile float target_rpm = 0.0f;
-uint8_t rx_byte;
-char cmd_buf[CMD_BUF_LEN];
-uint8_t cmd_idx = 0;
 
 // Simple printf retarget to USART2
 int __io_putchar(int ch) {
@@ -259,7 +261,7 @@ int main(void)
 	      */
 	      static float p_term;
 
-	      float ff = (0.487f * target_rpm) + 11.47f; //feedforward term based on linear regression of data
+	      float ff = (ff_a * target_rpm) + ff_b; //feedforward term based on linear regression of data
 
 
 	      p_term = Kp * error;
